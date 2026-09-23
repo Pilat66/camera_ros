@@ -15,6 +15,7 @@
 #include <cv_bridge/cv_bridge.h>
 #endif
 #include <atomic>
+#include <chrono>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <iostream>
 #include <libcamera/base/shared_fd.h>
@@ -32,6 +33,7 @@
 #include <libcamera/request.h>
 #include <libcamera/stream.h>
 #include <memory>
+#include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <optional>
@@ -121,6 +123,11 @@ private:
 
   // compression quality parameter
   std::atomic_uint8_t jpeg_quality;
+
+  // publish rate limiting: minimum interval between consecutive image publications
+  std::atomic<int64_t> publish_interval_ms;
+  std::chrono::steady_clock::time_point last_publish_time;
+  std::mutex publish_mutex;
 
   void
   onDisconnect();
@@ -338,6 +345,22 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
     // default to 95
     jpeg_quality = declare_parameter<uint8_t>("jpeg_quality", 95, jpeg_quality_description);
   }
+
+  // publish rate limiting parameter
+  rcl_interfaces::msg::ParameterDescriptor param_descr_publish_interval;
+  param_descr_publish_interval.name = "publish_interval_ms";
+  param_descr_publish_interval.type = rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER;
+  param_descr_publish_interval.description =
+    "Minimum interval between consecutive image publications in milliseconds "
+    "(0 = publish every frame)";
+  param_descr_publish_interval.read_only = false;
+  rcl_interfaces::msg::IntegerRange publish_interval_range;
+  publish_interval_range.from_value = 0;
+  publish_interval_range.to_value = 60000;
+  publish_interval_range.step = 1;
+  param_descr_publish_interval.integer_range = {publish_interval_range};
+  publish_interval_ms =
+    declare_parameter<int64_t>("publish_interval_ms", 0, param_descr_publish_interval);
 
   // use_node_time parameter
   rcl_interfaces::msg::ParameterDescriptor param_descr_use_node_time;
@@ -767,65 +790,88 @@ CameraNode::process(libcamera::Request *const request)
         diagnostic_status.values.push_back(kv);
       }
 
-      // get the stream and buffer from the request
-      const libcamera::FrameBuffer *buffer = request->findBuffer(stream);
-      const libcamera::FrameMetadata &metadata = buffer->metadata();
-      size_t bytesused = 0;
-      for (const libcamera::FrameMetadata::Plane &plane : metadata.planes())
-        bytesused += plane.bytesused;
-
-      // prepare image messages
-      const libcamera::StreamConfiguration &cfg = stream->configuration();
-
-      auto msg_img = std::make_unique<sensor_msgs::msg::Image>();
-      auto msg_img_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
-
-      if (format_type(cfg.pixelFormat) == FormatType::RAW) {
-        // raw uncompressed image
-        assert(buffer_info[buffer].size == bytesused);
-        msg_img->header = hdr;
-        msg_img->width = cfg.size.width;
-        msg_img->height = cfg.size.height;
-        msg_img->step = cfg.stride;
-        msg_img->encoding = get_ros_encoding(cfg.pixelFormat);
-        msg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
-        msg_img->data.resize(buffer_info[buffer].size);
-        memcpy(msg_img->data.data(), buffer_info[buffer].data, buffer_info[buffer].size);
-
-        // compress to jpeg
-        if (pub_image_compressed->get_subscription_count()) {
-          try {
-            compressImageMsg(*msg_img, *msg_img_compressed,
-                             {cv::IMWRITE_JPEG_QUALITY, jpeg_quality});
-          }
-          catch (const cv_bridge::Exception &e) {
-            RCLCPP_ERROR_STREAM(get_logger(), e.what());
-          }
+      // throttle image publications: skip frames that arrive earlier than the
+      // configured publish interval since the last published frame
+      const int64_t interval_ms = publish_interval_ms.load();
+      const auto now = std::chrono::steady_clock::now();
+      bool skip_publish = false;
+      {
+        std::lock_guard<std::mutex> lk(publish_mutex);
+        if (interval_ms > 0 &&
+            now - last_publish_time < std::chrono::milliseconds(interval_ms)) {
+          skip_publish = true;
+        }
+        else {
+          last_publish_time = now;
         }
       }
-      else if (format_type(cfg.pixelFormat) == FormatType::COMPRESSED) {
-        // compressed image
-        assert(bytesused < buffer_info[buffer].size);
-        msg_img_compressed->header = hdr;
-        msg_img_compressed->format = get_ros_encoding(cfg.pixelFormat);
-        msg_img_compressed->data.resize(bytesused);
-        memcpy(msg_img_compressed->data.data(), buffer_info[buffer].data, bytesused);
 
-        // decompress into raw rgb8 image
-        if (pub_image->get_subscription_count())
-          cv_bridge::toCvCopy(*msg_img_compressed, "rgb8")->toImageMsg(*msg_img);
+      if (skip_publish) {
+        RCLCPP_DEBUG_STREAM(get_logger(),
+                            "skipping image publication: less than "
+                                << interval_ms << " ms since the last published image");
       }
       else {
-        throw std::runtime_error("unsupported pixel format: " +
-                                 stream->configuration().pixelFormat.toString());
+        // get the stream and buffer from the request
+        const libcamera::FrameBuffer *buffer = request->findBuffer(stream);
+        const libcamera::FrameMetadata &metadata = buffer->metadata();
+        size_t bytesused = 0;
+        for (const libcamera::FrameMetadata::Plane &plane : metadata.planes())
+          bytesused += plane.bytesused;
+
+        // prepare image messages
+        const libcamera::StreamConfiguration &cfg = stream->configuration();
+
+        auto msg_img = std::make_unique<sensor_msgs::msg::Image>();
+        auto msg_img_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
+
+        if (format_type(cfg.pixelFormat) == FormatType::RAW) {
+          // raw uncompressed image
+          assert(buffer_info[buffer].size == bytesused);
+          msg_img->header = hdr;
+          msg_img->width = cfg.size.width;
+          msg_img->height = cfg.size.height;
+          msg_img->step = cfg.stride;
+          msg_img->encoding = get_ros_encoding(cfg.pixelFormat);
+          msg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
+          msg_img->data.resize(buffer_info[buffer].size);
+          memcpy(msg_img->data.data(), buffer_info[buffer].data, buffer_info[buffer].size);
+
+          // compress to jpeg
+          if (pub_image_compressed->get_subscription_count()) {
+            try {
+              compressImageMsg(*msg_img, *msg_img_compressed,
+                               {cv::IMWRITE_JPEG_QUALITY, jpeg_quality});
+            }
+            catch (const cv_bridge::Exception &e) {
+              RCLCPP_ERROR_STREAM(get_logger(), e.what());
+            }
+          }
+        }
+        else if (format_type(cfg.pixelFormat) == FormatType::COMPRESSED) {
+          // compressed image
+          assert(bytesused < buffer_info[buffer].size);
+          msg_img_compressed->header = hdr;
+          msg_img_compressed->format = get_ros_encoding(cfg.pixelFormat);
+          msg_img_compressed->data.resize(bytesused);
+          memcpy(msg_img_compressed->data.data(), buffer_info[buffer].data, bytesused);
+
+          // decompress into raw rgb8 image
+          if (pub_image->get_subscription_count())
+            cv_bridge::toCvCopy(*msg_img_compressed, "rgb8")->toImageMsg(*msg_img);
+        }
+        else {
+          throw std::runtime_error("unsupported pixel format: " +
+                                   stream->configuration().pixelFormat.toString());
+        }
+
+        pub_image->publish(std::move(msg_img));
+        pub_image_compressed->publish(std::move(msg_img_compressed));
+
+        sensor_msgs::msg::CameraInfo ci = cim.getCameraInfo();
+        ci.header = hdr;
+        pub_ci->publish(ci);
       }
-
-      pub_image->publish(std::move(msg_img));
-      pub_image_compressed->publish(std::move(msg_img_compressed));
-
-      sensor_msgs::msg::CameraInfo ci = cim.getCameraInfo();
-      ci.header = hdr;
-      pub_ci->publish(ci);
     }
     else if (request->status() == libcamera::Request::RequestCancelled) {
       diagnostic_status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
@@ -869,6 +915,9 @@ CameraNode::postParameterChange(const std::vector<rclcpp::Parameter> &parameters
   for (const rclcpp::Parameter &parameter : parameters) {
     if (parameter.get_name() == "jpeg_quality") {
       jpeg_quality = parameter.get_parameter_value().get<uint8_t>();
+    }
+    else if (parameter.get_name() == "publish_interval_ms") {
+      publish_interval_ms = parameter.get_parameter_value().get<int64_t>();
     }
   }
 }
