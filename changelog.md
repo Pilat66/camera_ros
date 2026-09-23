@@ -1,16 +1,16 @@
 # Changelog
 
-Все изменения, влияющие на поведение узла, фиксируются здесь.
+All changes affecting the node behaviour are tracked here.
 
 ## Unreleased
 
-- Добавлен launch-аргумент `publish_interval_ms` в `launch/camera.launch.py` —
-  минимальный интервал между публикациями изображений в миллисекундах
-  (0 = публиковать каждый кадр). Запуск:
+- Added a `publish_interval_ms` launch argument to `launch/camera.launch.py` —
+  minimum interval between consecutive image publications in milliseconds
+  (0 = publish every frame). Usage:
   `ros2 launch camera_ros camera.launch.py publish_interval_ms:=100`.
 
-- Добавлен динамический параметр `publish_interval_ms` — минимальный интервал
-  между публикациями изображений на `~/image_raw` и `~/image_raw/compressed`
-  в миллисекундах (0 = публиковать каждый кадр). Кадры, пришедшие с камеры
-  раньше истечения интервала, отбрасываются: изображения не готовятся и не
-  публикуются, буфер возвращается камере (src/CameraNode.cpp).
+- Added the dynamic parameter `publish_interval_ms` — minimum interval between
+  consecutive image publications on `~/image_raw` and `~/image_raw/compressed`
+  in milliseconds (0 = publish every frame). Frames arriving earlier than the
+  configured interval are discarded: images are not prepared or published and
+  the buffer is returned to the camera (src/CameraNode.cpp).
