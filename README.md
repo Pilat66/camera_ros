@@ -167,8 +167,12 @@ ros2 run camera_ros camera_node --ros-args -p FrameDurationLimits:="[50000,50000
 
 By default, the node publishes every camera frame on `~/image_raw` and `~/image_raw/compressed`. The camera often provides frames faster than required by the consumer. The dynamic parameter `publish_interval_ms` throttles the image publications: a frame is skipped if less than the configured interval has elapsed since the last published frame. This only drops publications on the node level, while the camera keeps streaming at its native rate. The diagnostic topic still receives every frame. A value of `0` (default) disables throttling and publishes every frame.
 
+The launch file exposes this parameter as a launch argument, e.g.:
+
 ```sh
 # publish at most 10 Hz (100 ms interval)
+ros2 launch camera_ros camera.launch.py publish_interval_ms:=100
+# standalone executable
 ros2 run camera_ros camera_node --ros-args -p publish_interval_ms:=100
 ```
 

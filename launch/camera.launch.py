@@ -42,6 +42,19 @@ def generate_launch_description() -> LaunchDescription:
         description="pixel format"
     )
 
+    publish_interval_param_name = "publish_interval_ms"
+    publish_interval_param_default = str(0)
+    publish_interval_param = LaunchConfiguration(
+        publish_interval_param_name,
+        default=publish_interval_param_default,
+    )
+    publish_interval_launch_arg = DeclareLaunchArgument(
+        publish_interval_param_name,
+        default_value=publish_interval_param_default,
+        description="minimum interval between consecutive image publications in milliseconds "
+                    "(0 = publish every frame, frames arriving earlier are discarded)"
+    )
+
     # camera node
     composable_nodes = [
         ComposableNode(
@@ -52,6 +65,7 @@ def generate_launch_description() -> LaunchDescription:
                 "width": 640,
                 "height": 480,
                 "format": format_param,
+                "publish_interval_ms": publish_interval_param,
             }],
             extra_arguments=[{'use_intra_process_comms': True}],
         ),
@@ -81,4 +95,5 @@ def generate_launch_description() -> LaunchDescription:
         container,
         camera_launch_arg,
         format_launch_arg,
+        publish_interval_launch_arg,
     ])

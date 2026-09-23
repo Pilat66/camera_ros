@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Добавлен launch-аргумент `publish_interval_ms` в `launch/camera.launch.py` —
+  минимальный интервал между публикациями изображений в миллисекундах
+  (0 = публиковать каждый кадр). Запуск:
+  `ros2 launch camera_ros camera.launch.py publish_interval_ms:=100`.
+
 - Добавлен динамический параметр `publish_interval_ms` — минимальный интервал
   между публикациями изображений на `~/image_raw` и `~/image_raw/compressed`
   в миллисекундах (0 = публиковать каждый кадр). Кадры, пришедшие с камеры
